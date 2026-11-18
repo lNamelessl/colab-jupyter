@@ -434,23 +434,32 @@ async def admin_wsdebug(request: Request):
     if not _session_ok(request):
         return JSONResponse({"error": "unauthenticated"}, status_code=401)
     st = get_state()
-    form = await request.form()
-    kernel_id = str(form.get("kernel_id", "")).strip()
-    if not kernel_id:
-        kernels = await app.state.http.get(
-            f"{st.conn['url']}/api/kernels", headers={"x-colab-runtime-proxy-token": st.conn["token"]}
+    H = {"x-colab-runtime-proxy-token": st.conn["token"], "content-type": "application/json"}
+    kernel_id = None
+    kl = await app.state.http.get(f"{st.conn['url']}/api/kernels", headers=H)
+    kid_list = kl.json()
+    kid_list = kid_list if isinstance(kid_list, list) else kid_list.get("kernels", [])
+    if kid_list:
+        kernel_id = kid_list[0]["id"]
+    else:
+        kc = await app.state.http.post(
+            f"{st.conn['url']}/api/kernels", headers=H, json={"name": "python3"}
         )
-        kid_list = kernels.json()
-        kernel_id = (kid_list[0]["id"] if isinstance(kid_list, list) and kid_list else None)
+        if kc.status_code == 200:
+            kernel_id = kc.json().get("id")
     if not kernel_id:
-        return JSONResponse({"error": "no kernel"}, status_code=404)
-    from .proxy import _ws_upstream_url, _UpstreamBridge
+        return JSONResponse({"error": "no kernel", "list_status": kl.status_code,
+                             "create_status": kc.status_code})
+    result = {"kernel_id": kernel_id}
+    from .proxy import _connect_bridge
+
+    import json as _json
 
     query = f"session_id=wsdebug-{kernel_id[:8]}"
     bridge = await _connect_bridge(st, f"api/kernels/{kernel_id}/channels", query)
     if bridge is None:
-        return JSONResponse({"error": "bridge refused", "close_info": getattr(bridge, "close_info", "")})
-    result = {"opened": True, "events": []}
+        return JSONResponse({"error": "bridge refused", "kernel_id": kernel_id})
+    result["opened"] = True
     msg = {
         "header": {"msg_id": "debug-1", "msg_type": "kernel_info_request",
                    "session": f"wsdebug-{kernel_id[:8]}", "username": "debug",
@@ -458,16 +467,17 @@ async def admin_wsdebug(request: Request):
         "parent_header": {}, "metadata": {},
         "content": {}, "channel": "shell", "buffers": [],
     }
-    ok = bridge.send(text=__import__("json").dumps(msg))
+    ok = bridge.send(text=_json.dumps(msg))
     result["send_ok"] = ok
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + 20
+    deadline = loop.time() + 25
     while loop.time() < deadline:
         try:
-            kind, payload = await asyncio.wait_for(bridge.recv(), timeout=20)
+            kind, payload = await asyncio.wait_for(bridge.recv(), timeout=10)
         except asyncio.TimeoutError:
             break
-        result["events"].append({"kind": kind, "msg_type": (payload if isinstance(payload, str) else "")[:80]})
+        snippet = payload if isinstance(payload, str) else repr(payload)[:60]
+        result.setdefault("events", []).append(str(snippet)[:160])
         if isinstance(payload, str) and "kernel_info_reply" in payload:
             result["reply"] = "GOT_KERNEL_INFO_REPLY"
             break
