@@ -182,7 +182,6 @@ class _UpstreamBridge:
             on_data=self._on_data,
             on_error=self._on_error,
             on_close=self._on_close,
-            skip_utf8_validation=True,
         )
         self._app = app
         self._thread = threading.Thread(
