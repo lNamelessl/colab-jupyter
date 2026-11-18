@@ -149,6 +149,8 @@ async def _wait_kernel_idle(st, kernel_id: str, timeout_s: float) -> None:
                     f"{st.conn['url']}/api/kernels/{kernel_id}",
                     headers=_inject({}),
                 )
+                if r.status_code == 404:
+                    return  # kernel does not exist; let the handshake surface it
                 if r.status_code == 200:
                     state = (r.json() or {}).get("execution_state") or state
                     if state != "starting":

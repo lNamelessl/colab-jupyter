@@ -144,8 +144,12 @@ class CredStore:
     def access_token(self) -> str:
         """Valid access token; refreshes when missing/expiring (<60 s left)."""
         creds = self._ensure()
-        needs_refresh = creds.token is None or creds.expiry is None or (
-            creds.expiry - datetime.now(timezone.utc) < timedelta(seconds=60)
+        expiry = creds.expiry
+        if expiry is not None and expiry.tzinfo is None:
+            # google-auth returns naive UTC datetimes
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        needs_refresh = creds.token is None or expiry is None or (
+            expiry - datetime.now(timezone.utc) < timedelta(seconds=60)
         )
         if needs_refresh:
             with self._lock:
