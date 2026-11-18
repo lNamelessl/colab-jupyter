@@ -242,10 +242,11 @@ class _UpstreamBridge:
         self._put(("open", None))
 
     def _on_data(self, app, data, data_type, cont) -> None:
-        # OPCODE_TEXT=1, OPCODE_BINARY=2
-        self._put(("msg", data if data_type == 2 else data.decode("utf-8", "replace")))
+        # websocket-client delivers TEXT frames as str and BINARY as bytes.
+        self._put(("msg", data))
 
     def _on_error(self, app, err) -> None:
+        log.warning("upstream WS bridge error: %s", err)
         if self.close_info == "":
             self.close_info = f"error: {err}"
 
