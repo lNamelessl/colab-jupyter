@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title id="title">Notebook — Jupyter Gateway for Colab</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: #f4f5f7; margin: 0; padding: 1.6rem 1rem 3rem; color: #22272f; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .bar { background: #fff; border: 1px solid #e2e4e8; border-radius: 12px; padding: .9rem 1.2rem;
+         margin-bottom: 1rem; box-shadow: 0 8px 24px rgba(20,24,31,.08); display: flex; gap: .5rem;
+         flex-wrap: wrap; align-items: center; position: sticky; top: .6rem; z-index: 5; }
+  a.btn, button { display: inline-block; background: #1a73e8; color: #fff; text-decoration: none;
+                  padding: .45rem .85rem; border-radius: 8px; border: 0; cursor: pointer; font-size: .85rem; }
+  button.ghost { background: #eceff3; color: #2b2f36; }
+  button.danger { background: #a02626; }
+  .title { font-weight: 600; font-size: .95rem; margin-right: auto; word-break: break-all; }
+  select { padding: .42rem .5rem; border: 1px solid #ccd1d9; border-radius: 8px; font-size: .85rem; }
+  .kstate { font-size: .78rem; padding: .2rem .55rem; border-radius: 999px; background: #eceff3; }
+  .kstate.ok { background: #e8f6ee; color: #176a3a; }
+  .kstate.busy { background: #fff3d6; color: #8a6300; }
+  .kstate.dead { background: #fdecec; color: #a02626; }
+  .cell { background: #fff; border: 1px solid #e2e4e8; border-radius: 10px; margin-bottom: .9rem;
+          overflow: hidden; }
+  .cell-head { display: flex; gap: .4rem; align-items: center; padding: .4rem .7rem; background: #fafbfc;
+               border-bottom: 1px solid #eef0f3; font-size: .75rem; color: #7a828e; }
+  .cell-head .num { font-weight: 600; color: #444; }
+  .cell-head .right { margin-left: auto; display: flex; gap: .35rem; }
+  .cell-head button { padding: .25rem .6rem; font-size: .75rem; }
+  textarea.src { width: 100%; box-sizing: border-box; border: 0; outline: 0; resize: vertical;
+                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .84rem;
+                 line-height: 1.55; padding: .7rem .9rem; min-height: 60px; background: #fff; }
+  .out { border-top: 1px solid #eef0f3; padding: .55rem .9rem; font-family: ui-monospace, monospace;
+         font-size: .8rem; white-space: pre-wrap; word-break: break-word; background: #10141a;
+         color: #c9d3df; max-height: 340px; overflow: auto; }
+  .out .err { color: #ff9d9d; }
+  .out img { max-width: 100%; background: #fff; border-radius: 6px; margin: .3rem 0; }
+  .md-src { padding: .7rem .9rem; color: #5b6470; font-family: ui-monospace, monospace;
+            font-size: .82rem; white-space: pre-wrap; background: #fbfbfc; }
+  #toast { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); background: #2b2f36;
+           color: #fff; padding: .5rem 1rem; border-radius: 8px; font-size: .85rem; opacity: 0;
+           transition: opacity .3s; pointer-events: none; }
+  .muted { color: #7a828e; font-size: .78rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="title" id="pathLabel"></span>
+    <span class="kstate" id="kstate">kernel: ?</span>
+    <select id="kernelSel"><option value="python3">python3</option><option value="julia">julia</option><option value="ir">ir</option></select>
+    <button onclick="runAll()">Run all</button>
+    <button class="ghost" onclick="addCell('code')">+ Code</button>
+    <button class="ghost" onclick="addCell('markdown')">+ Markdown</button>
+    <button class="ghost" onclick="saveNotebook()">Save</button>
+    <a class="btn" style="background:#2b2f36" href="/nb" id="backLink">Files</a>
+  </div>
+  <div id="cells"></div>
+  <p class="muted">Execution runs on the Colab runtime via standard Jupyter kernel channels
+  proxied through this gateway. Outputs are saved into the notebook file (server-side).</p>
+</div>
+<div id="toast"></div>
+<script>
+const PATH = decodeURIComponent(location.pathname.replace(/^\/nb\/view\//, ''))
+const JSESSION = 'gw-' + Math.random().toString(36).slice(2)
+let NB = null
+let KERNEL_ID = null
+let SESSION = null
+let WS = null
+let wsReady = null
+const pending = new Map()  // msg_id -> resolver state
+
+const esc = (s) => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML }
+const toast = (m) => { const t = document.getElementById('toast'); t.textContent = m; t.style.opacity = 1; setTimeout(() => t.style.opacity = 0, 1600) }
+const pathUrl = () => PATH.split('/').map(encodeURIComponent).join('/')
+
+async function api(path, opts) {
+  const r = await fetch(path, opts)
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`)
+  return r.json()
+}
+
+// ---- kernel session ---------------------------------------------------------
+async function ensureSession() {
+  if (SESSION && KERNEL_ID) return SESSION
+  const sessions = await api('/api/sessions').catch(() => [])
+  const mine = (Array.isArray(sessions) ? sessions : sessions.sessions || []).find(s => s.path === PATH || s.name === PATH)
+  if (mine && mine.kernel && mine.kernel.id &&
+      (await api('/api/kernels/' + mine.kernel.id).then(() => true).catch(() => false))) {
+    SESSION = mine; KERNEL_ID = mine.kernel.id
+  } else {
+    SESSION = await api('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: PATH, name: PATH, type: 'notebook', kernel: { name: document.getElementById('kernelSel').value } }) })
+    KERNEL_ID = SESSION.kernel.id
+  }
+  setK('idle')
+  return SESSION
+}
+
+function setK(state) {
+  const el = document.getElementById('kstate')
+  el.textContent = 'kernel: ' + state
+  el.className = 'kstate ' + (state === 'idle' ? 'ok' : state === 'busy' || state === 'starting' ? 'busy' : state === 'dead' ? 'dead' : '')
+}
+
+function connectWS() {
+  if (WS && wsReady && wsReady.resolved) return Promise.resolve()
+  if (wsReady) return wsReady.promise
+  let resolve, reject
+  wsReady = { resolved: false, promise: new Promise((res, rej) => { resolve = res; reject = rej }) }
+  wsReady.resolve = resolve
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'
+  WS = new WebSocket(`${proto}${location.host}/api/kernels/${KERNEL_ID}/channels?session_id=${JSESSION}`)
+  WS.onopen = () => { wsReady.resolved = true; resolve() }
+  WS.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data) } catch { return }
+    if (m.msg_type === 'colab_request') return  // Colab-internal handshake
+    const p = pending.get(m.parent_header?.msg_id)
+    if (p) p(m)
+    if (m.msg_type === 'status' && !m.parent_header?.msg_id) setK(m.content.execution_state)
+  }
+  WS.onclose = () => { wsReady = null; WS = null; setK('reconnecting') }
+  WS.onerror = () => { if (!wsReady.resolved) reject(new Error('kernel WS failed')) }
+  return wsReady.promise
+}
+
+const sendMsg = (msg_type, content) => {
+  const msg_id = 'gw' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+  WS.send(JSON.stringify({
+    header: { msg_id, msg_type, session: JSESSION, username: 'gateway-ui', version: '5.3', date: new Date().toISOString() },
+    parent_header: {}, metadata: {}, content, channel: 'shell', buffers: [],
+  }))
+  return msg_id
+}
+
+async function ensureKernelInfo() {
+  await connectWS()
+  const id = sendMsg('kernel_info_request', {})
+  await new Promise((res) => {
+    const t = setTimeout(res, 15000)
+    pending.set(id, (m) => { if (m.msg_type === 'kernel_info_reply') { clearTimeout(t); pending.delete(id); res(m) } })
+  })
+}
+
+// ---- cell execution ----------------------------------------------------------
+async function runCell(idx) {
+  const cell = NB.cells[idx]
+  if (cell.cell_type !== 'code') return
+  try {
+    await ensureSession()
+    await ensureKernelInfo()
+  } catch (e) { cell.outputs = [{ output_type: 'stream', name: 'stderr', text: 'Kernel connection failed: ' + e.message }]; renderCell(idx); return }
+  setK('busy')
+  cell.outputs = []
+  cell.execution_count = null
+  renderCell(idx)
+  const msg_id = sendMsg('execute_request', { code: cell.source, silent: false, store_history: true, user_expressions: {}, allow_stdin: false, stop_on_error: false })
+  const done = new Promise((res) => {
+    const t = setTimeout(() => res('timeout'), 600000)
+    pending.set(msg_id, (m) => {
+      if (m.parent_header?.msg_id !== msg_id) return
+      const c = m.content || {}
+      if (m.channel !== 'iopub') {
+        if (m.msg_type === 'execute_reply') { clearTimeout(t); pending.delete(msg_id); res('ok') }
+        return
+      }
+      if (m.msg_type === 'stream') cell.outputs.push({ output_type: 'stream', name: c.name || 'stdout', text: (c.text || '').toString() })
+      else if (m.msg_type === 'execute_result' || m.msg_type === 'display_data') {
+        const out = { output_type: m.msg_type === 'execute_result' ? 'execute_result' : 'display_data', data: c.data || {}, metadata: c.metadata || {} }
+        if (m.msg_type === 'execute_result') out.execution_count = c.execution_count
+        cell.outputs.push(out)
+      } else if (m.msg_type === 'error') {
+        cell.outputs.push({ output_type: 'error', ename: c.ename, evalue: c.evalue, traceback: c.traceback || [] })
+      } else if (m.msg_type === 'status' && c.execution_state === 'idle') {
+        clearTimeout(t); pending.delete(msg_id); res('ok')
+      }
+      renderCell(idx)
+    })
+  })
+  const result = await done
+  if (result === 'timeout') cell.outputs.push({ output_type: 'stream', name: 'stderr', text: 'Execution timed out after 600 s' })
+  cell.execution_count = cell.execution_count || (await (async () => { let n = null; return n })()) || null
+  renderCell(idx)
+  saveNotebook(true)  // outputs persist into the notebook file (server-side)
+  const st = await api('/api/kernels/' + KERNEL_ID).catch(() => ({ execution_state: 'unknown' }))
+  setK(st.execution_state || 'unknown')
+}
+
+// ---- rendering ----------------------------------------------------------------
+function renderOutput(out) {
+  if (out.output_type === 'stream') return esc(out.text)
+  if (out.output_type === 'error') {
+    return `<span class="err">${esc((out.traceback || []).join('\n') || (out.ename + ': ' + out.evalue))}</span>`
+  }
+  const d = out.data || {}
+  if (d['image/png']) return `<img src="data:image/png;base64,${d['image/png']}">` + (d['text/plain'] ? '\n' + esc(d['text/plain']) : '')
+  if (d['text/html']) return `<div style="font-family:ui-sans-serif;background:#fff;color:#222;border-radius:6px;padding:.4rem">${d['text/html']}</div>`
+  if (d['text/plain']) return esc(d['text/plain'])
+  if (d['application/json']) return esc(JSON.stringify(d['application/json'], null, 2))
+  return '[rich output: ' + esc(Object.keys(d).join(', ')) + ']'
+}
+
+function renderCell(idx) {
+  const cell = NB.cells[idx]
+  let html = `<div class="cell" id="cell-${idx}"><div class="cell-head">
+    <span class="num">${cell.cell_type === 'code' ? '[' + (cell.execution_count ?? ' ') + ']' : 'md'}</span>
+    <span>${cell.cell_type}</span>
+    <span class="right">
+      ${cell.cell_type === 'code' ? `<button onclick="runCell(${idx})">Run</button>` : ''}
+      <button class="ghost" onclick="moveCell(${idx},-1)">↑</button>
+      <button class="ghost" onclick="moveCell(${idx},1)">↓</button>
+      <button class="danger" onclick="delCell(${idx})">×</button>
+    </span></div>`
+  html += cell.cell_type === 'markdown'
+    ? `<div class="md-src" contenteditable="true" oninput="NB.cells[${idx}].source=this.innerText; markDirty()">${esc(cell.source)}</div>`
+    : `<textarea class="src" spellcheck="false" oninput="NB.cells[${idx}].source=this.value; markDirty()">${esc(cell.source)}</textarea>`
+  if (cell.cell_type === 'code') {
+    html += `<div class="out" id="out-${idx}">${cell.outputs && cell.outputs.length ? cell.outputs.map(renderOutput).join('\n') : '<span style="color:#5b6470">(no output)</span>'}</div>`
+  }
+  html += '</div>'
+  const existing = document.getElementById(`cell-${idx}`)
+  if (existing) { existing.outerHTML = html } else {
+    document.getElementById('cells').insertAdjacentHTML('beforeend', html)
+  }
+}
+const rerenderAll = () => { document.getElementById('cells').innerHTML = ''; NB.cells.forEach((_, i) => renderCell(i)) }
+
+function addCell(type) { NB.cells.push({ cell_type: type, source: '', metadata: {}, outputs: [], execution_count: null }); renderCell(NB.cells.length - 1); markDirty() }
+function delCell(i) { if (!confirm('Delete cell ' + (i + 1) + '?')) return; NB.cells.splice(i, 1); rerenderAll(); markDirty() }
+function moveCell(i, d) { const j = i + d; if (j < 0 || j >= NB.cells.length) return; [NB.cells[i], NB.cells[j]] = [NB.cells[j], NB.cells[i]]; rerenderAll(); markDirty() }
+function runAll() { (async () => { for (let i = 0; i < NB.cells.length; i++) if (NB.cells[i].cell_type === 'code') await runCell(i) })() }
+
+let dirty = false
+const markDirty = () => { dirty = true }
+
+// ---- persistence ---------------------------------------------------------------
+async function loadNotebook() {
+  const data = await api(`/api/contents/${pathUrl()}?content=1`)
+  if (data.type === 'notebook') {
+    NB = { cells: (data.content.cells || []).map(c => ({ ...c, source: Array.isArray(c.source) ? c.source.join('') : c.source })) }
+    if (!NB.cells.length) { NB.cells.push({ cell_type: 'code', source: '', metadata: {}, outputs: [], execution_count: null }); }
+  } else {
+    NB = { cells: [{ cell_type: 'code', source: typeof data.content === 'string' ? data.content : '', metadata: {}, outputs: [], execution_count: null }] }
+  }
+  document.getElementById('pathLabel').textContent = PATH
+  document.getElementById('title').textContent = PATH + ' — Jupyter Gateway'
+  document.getElementById('backLink').href = '/nb?dir=' + encodeURIComponent(PATH.split('/').slice(0, -1).join('/'))
+  rerenderAll()
+}
+
+async function saveNotebook(silent) {
+  const payload = {
+    type: 'notebook',
+    content: {
+      cells: NB.cells.map(c => ({
+        cell_type: c.cell_type, metadata: c.metadata || {}, source: c.source,
+        ...(c.cell_type === 'code' ? { outputs: c.outputs || [], execution_count: c.execution_count || null } : {}),
+      })),
+      metadata: NB.metadata || {}, nbformat: 4, nbformat_minor: 5,
+    },
+  }
+  await api(`/api/contents/${pathUrl()}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+  dirty = false
+  if (!silent) toast('Saved to the Colab runtime')
+}
+window.saveNotebook = saveNotebook
+setInterval(() => { if (dirty) saveNotebook(true).catch(() => {}) }, 15000)
+loadNotebook().catch(e => { document.getElementById('pathLabel').textContent = 'load failed: ' + e.message })
+</script>
+</body>
+</html>

@@ -317,6 +317,20 @@ async def admin(request: Request):
     )
 
 
+@app.get("/nb")
+async def nb_home(request: Request):
+    if not _session_ok(request):
+        return _gate_redirect(request)
+    return templates.TemplateResponse(request, "nb_home.html", {})
+
+
+@app.get("/nb/view/{path:path}")
+async def nb_view(request: Request, path: str):
+    if not _session_ok(request):
+        return _gate_redirect(request)
+    return templates.TemplateResponse(request, "nb_edit.html", {"path": path})
+
+
 @app.get("/admin/state")
 async def admin_state(request: Request):
     if not _session_ok(request):

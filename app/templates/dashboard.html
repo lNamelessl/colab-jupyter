@@ -94,7 +94,7 @@
       <div class="row"><span class="spin"></span> Provisioning… this page polls every 8 seconds.</div>
     {% elif st.status == "ACTIVE" %}
       <div class="row">
-        <a class="btn" href="/lab" data-open>Open Jupyter (via gateway)</a>
+        <a class="btn" href="/nb" data-open>Open notebook UI</a>
         <form method="post" action="/admin/refresh"><button type="submit" class="ghost">Force token refresh</button></form>
         <form method="post" action="/admin/delete" onsubmit="return confirm('Delete the Colab runtime? This is irreversible and destroys every notebook and file on it.');">
           <button type="submit" class="danger">Delete runtime</button>
