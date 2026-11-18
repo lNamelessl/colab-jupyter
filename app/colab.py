@@ -70,7 +70,7 @@ class ColabClient:
         await self._client.aclose()
 
     async def _headers(self) -> dict:
-        tok = await self._creds.access_token()
+        tok = self._creds.access_token()  # sync google-auth refresh (cached)
         h = {"Authorization": f"Bearer {tok}", "Accept": "application/json"}
         # Quirk 57b: the Colab API rejects ADC user credentials without a quota
         # project — every call carries x-goog-user-project.
