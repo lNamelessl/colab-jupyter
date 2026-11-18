@@ -155,7 +155,13 @@ async def _pipe(ws: WebSocket, st, url: str, subpath: str) -> None:
     for t in (to_up, from_up):
         t.cancel()
 
-    if to_up in done and not to_up.exception():
+    browser_closed = False
+    if to_up in done and not to_up.cancelled():
+        try:
+            browser_closed = to_up.exception() is None
+        except Exception:
+            browser_closed = False
+    if browser_closed:
         # Browser went away: nothing to preserve.
         await _close_up(upstream)
         return
