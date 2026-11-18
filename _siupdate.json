@@ -1,4 +1,0 @@
-{"input": {
-  "healthcheckPath": "/health",
-  "healthcheckTimeout": 300
-}}
