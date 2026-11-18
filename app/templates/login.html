@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Jupyter Gateway for Colab</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: #f4f5f7; margin: 0; display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+  .card { background: #fff; border: 1px solid #e2e4e8; border-radius: 12px; padding: 2rem 2.25rem; width: 340px;
+          box-shadow: 0 8px 24px rgba(20,24,31,.08); }
+  h1 { font-size: 1.05rem; margin: 0 0 .35rem; }
+  p.sub { color: #5b6470; font-size: .85rem; margin: 0 0 1.25rem; }
+  label { display: block; font-size: .8rem; color: #444; margin-bottom: .35rem; }
+  input[type=password] { width: 100%; box-sizing: border-box; padding: .6rem .7rem; border: 1px solid #ccd1d9;
+                         border-radius: 8px; font-size: .95rem; }
+  button { margin-top: 1rem; width: 100%; padding: .6rem; background: #2b2f36; color: #fff; border: 0;
+           border-radius: 8px; font-size: .95rem; cursor: pointer; }
+  button:hover { background: #3a3f47; }
+  .err { background: #fdecec; border: 1px solid #f5b5b5; color: #a02626; border-radius: 8px;
+         padding: .55rem .7rem; font-size: .82rem; margin-bottom: 1rem; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Jupyter Gateway for Colab</h1>
+    <p class="sub">Enter the gateway password (GATEWAY_PASSWORD, on the Variables tab).</p>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autofocus autocomplete="current-password">
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>

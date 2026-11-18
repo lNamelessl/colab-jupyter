@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Google account — Jupyter Gateway for Colab</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: #f4f5f7; margin: 0; padding: 2rem 1rem; }
+  .card { background: #fff; border: 1px solid #e2e4e8; border-radius: 12px; padding: 1.5rem 1.75rem;
+          max-width: 720px; margin: 0 auto 1.25rem; box-shadow: 0 8px 24px rgba(20,24,31,.08); }
+  h1 { font-size: 1.1rem; margin: 0 0 .4rem; }
+  h2 { font-size: .95rem; margin: 0 0 .5rem; color: #2b2f36; }
+  p, li { color: #444b55; font-size: .88rem; line-height: 1.55; }
+  code { background: #f0f2f5; border-radius: 4px; padding: .1rem .35rem; font-size: .8rem; word-break: break-all; }
+  a.btn { display: inline-block; background: #1a73e8; color: #fff; text-decoration: none; padding: .55rem 1rem;
+          border-radius: 8px; font-size: .9rem; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 110px; border: 1px solid #ccd1d9; border-radius: 8px;
+             font-family: ui-monospace, monospace; font-size: .8rem; padding: .6rem; }
+  button { background: #2b2f36; color: #fff; border: 0; border-radius: 8px; padding: .55rem 1.1rem;
+           font-size: .9rem; cursor: pointer; margin-top: .6rem; }
+  .err { background: #fdecec; border: 1px solid #f5b5b5; color: #a02626; border-radius: 8px;
+         padding: .55rem .7rem; font-size: .82rem; margin: .75rem 0; }
+  .ok { background: #e8f6ee; border: 1px solid #b5dfc6; color: #176a3a; border-radius: 8px;
+        padding: .55rem .7rem; font-size: .85rem; margin: .5rem 0; }
+  .muted { color: #7a828e; font-size: .8rem; }
+  hr { border: 0; border-top: 1px solid #edeff2; margin: 1.1rem 0; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Connect your Google account</h1>
+    <p>The gateway provisions a <strong>Google Colab runtime</strong> through the official
+       Colab API on <em>your own account</em>. It needs a Google OAuth refresh token with the
+       <code>colaboratory</code> scope.</p>
+    {% if connected %}
+      <div class="ok">Connected{% if email %} as <strong>{{ email }}</strong>{% endif %}.</div>
+      <form method="post" action="/connect/disconnect">
+        <button type="submit" style="background:#a02626">Remove credential</button>
+      </form>
+      <p class="muted">Removing the credential stops new provisioning; existing runtimes keep
+      running until Google reclaims them.</p>
+      <p><a href="/admin">Back to dashboard</a></p>
+    {% else %}
+      <h2>Step 1 — approve the consent screen</h2>
+      <p><a class="btn" href="{{ consent_url }}" target="_blank" rel="noopener noreferrer">Open Google consent page</a></p>
+      <ul>
+        <li>Choose your Google account and approve the <code>cloud-platform</code> /
+            <code>colaboratory</code> scopes.</li>
+        <li><strong>After approving, the browser lands on a &ldquo;can't connect&rdquo; page
+            (localhost refused to connect) — that is expected.</strong> Copy the
+            <code>code=</code> value from the <strong>address bar</strong>
+            (it starts with <code>4/0A</code>, ends before any <code>&amp;scope</code>).</li>
+      </ul>
+      <h2>Step 2 — paste the code here</h2>
+      <form method="post" action="/connect/code">
+        <textarea name="authorization_code" placeholder="4/0A..."></textarea>
+        <button type="submit">Connect with code</button>
+      </form>
+      <hr>
+      <h2>Alternative — paste a full credential JSON</h2>
+      <p>If you already hold a refresh-token JSON
+         (<code>{"refresh_token": "...", "client_id": "...", "client_secret": "..."}</code>),
+         paste it directly (the <code>GOOGLE_CREDENTIALS_JSON</code> shape):</p>
+      <form method="post" action="/connect/json">
+        <textarea name="credential_json" placeholder='{"refresh_token": "...", "client_id": "...", "client_secret": "..."}'></textarea>
+        <button type="submit">Connect with JSON</button>
+      </form>
+      <p class="muted">The refresh token is stored on this gateway's private volume
+      (<code>/data</code>) and is only used to call the Colab API for your account.</p>
+    {% endif %}
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  </div>
+</body>
+</html>

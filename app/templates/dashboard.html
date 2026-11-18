@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — Jupyter Gateway for Colab</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: #f4f5f7; margin: 0; padding: 2rem 1rem; color: #22272f; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .card { background: #fff; border: 1px solid #e2e4e8; border-radius: 12px; padding: 1.4rem 1.6rem;
+          margin-bottom: 1.25rem; box-shadow: 0 8px 24px rgba(20,24,31,.08); }
+  h1 { font-size: 1.15rem; margin: 0 0 .25rem; }
+  h2 { font-size: .95rem; margin: 0 0 .75rem; color: #2b2f36; }
+  p, li { font-size: .88rem; line-height: 1.55; color: #444b55; }
+  .badge { display: inline-block; padding: .18rem .6rem; border-radius: 999px; font-size: .75rem;
+           font-weight: 600; letter-spacing: .02em; }
+  .b-NO_CREDENTIAL, .b-NO_RUNTIME { background: #fff3d6; color: #8a6300; }
+  .b-PROVISIONING { background: #e8f0fe; color: #174ea6; }
+  .b-ACTIVE { background: #e8f6ee; color: #176a3a; }
+  .b-RECLAIMED, .b-ERROR, .b-DELETING { background: #fdecec; color: #a02626; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  td, th { padding: .3rem .5rem; border-bottom: 1px solid #eef0f3; text-align: left; vertical-align: top; }
+  th { color: #7a828e; font-weight: 600; }
+  code { background: #f0f2f5; border-radius: 4px; padding: .1rem .35rem; font-size: .78rem; word-break: break-all; }
+  a.btn, button { display: inline-block; background: #1a73e8; color: #fff; text-decoration: none;
+                  padding: .55rem 1.05rem; border-radius: 8px; font-size: .88rem; border: 0; cursor: pointer; }
+  button.danger { background: #a02626; }
+  button.ghost { background: #eceff3; color: #2b2f36; }
+  .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-top: .8rem; }
+  .muted { color: #7a828e; font-size: .8rem; }
+  .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; line-height: 1.6;
+         max-height: 240px; overflow-y: auto; background: #10141a; color: #c9d3df; border-radius: 8px;
+         padding: .8rem .9rem; margin-top: .4rem; }
+  .log .t { color: #6b7686; }
+  .log .warn { color: #f0b429; }
+  select { padding: .5rem .6rem; border: 1px solid #ccd1d9; border-radius: 8px; font-size: .88rem; }
+  .spin { display: inline-block; width: .9rem; height: .9rem; border: 2px solid #fff; border-top-color: transparent;
+          border-radius: 50%; animation: s 1s linear infinite; vertical-align: -2px; margin-right: .4rem; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Jupyter Gateway for Colab
+      <span class="badge b-{{ st.status }}" data-badge>{{ st.status }}</span></h1>
+    <p>A familiar Jupyter UI backed by a <strong>Google Colab GPU runtime</strong>, proxied through
+       your own Railway URL with gateway auth. The runtime runs on Google's infrastructure —
+       closing the browser or redeploying this gateway does <strong>not</strong> stop it.</p>
+    {% if connected %}<p class="muted">Google account: {{ email or "connected" }}</p>
+    {% else %}
+    <div class="row"><a class="btn" href="/connect">Connect your Google account to begin</a></div>
+    {% endif %}
+  </div>
+
+  {% if not connected %}
+  <div class="card"><h2>Setup</h2>
+    <p>Add a Google credential on the <a href="/connect">connect page</a> (one-time, loopback
+       copy-paste flow), then provision a runtime below.</p>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2>Runtime</h2>
+    <table>
+      <tr><th>Runtime</th><td data-runtime>{{ st.runtime_name or "—" }}</td></tr>
+      <tr><th>Accelerator</th><td data-spec>
+        {% if st.spec %}{{ st.spec.get("accelerator", "") }} · {{ st.spec.get("variant", "") }} · {{ st.spec.get("shape", "") }}{% else %}—{% endif %}
+      </td></tr>
+      <tr><th>Proxy token expires</th><td data-expire>{{ st.conn["expire_time"] if st.conn else "—" }}
+        {% if st.conn %}<span class="muted">(auto-refreshed 5 min before expiry; refreshes: {{ st.token_refreshes }})</span>{% endif %}
+      </td></tr>
+      {% if st.last_error %}<tr><th>Last error</th><td style="color:#a02626">{{ st.last_error }}</td></tr>{% endif %}
+    </table>
+
+    {% if st.status in ("NO_RUNTIME", "RECLAIMED", "ERROR") and connected %}
+      {% if st.status == "RECLAIMED" %}
+        <p style="color:#8a6300">The runtime was reclaimed by Google (free-tier idle deletion or the
+        12-hour lifetime cap). Files on it are gone — reprovision to continue.</p>
+      {% endif %}
+      {% if specs %}
+      <div class="row">
+        <form method="post" action="/admin/create" style="display:flex;gap:.6rem;align-items:center">
+          <select name="spec">
+            {% for s in specs %}<option value="{{ s.variant }}|{{ s.accelerator }}|{{ s.shape }}">{{ s.label }}</option>{% endfor %}
+          </select>
+          <button type="submit">Provision runtime</button>
+        </form>
+      </div>
+      <p class="muted">Free tier: the T4 GPU spec (when eligible). Provisioning takes 1–3 minutes.
+      {% else %}<p class="muted">No eligible runtime specs returned for this account yet.</p>{% endif %}
+    {% elif st.status == "PROVISIONING" %}
+      <div class="row"><span class="spin"></span> Provisioning… this page polls every 8 seconds.</div>
+    {% elif st.status == "ACTIVE" %}
+      <div class="row">
+        <a class="btn" href="/lab" data-open>Open Jupyter (via gateway)</a>
+        <form method="post" action="/admin/refresh"><button type="submit" class="ghost">Force token refresh</button></form>
+        <form method="post" action="/admin/delete" onsubmit="return confirm('Delete the Colab runtime? This is irreversible and destroys every notebook and file on it.');">
+          <button type="submit" class="danger">Delete runtime</button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Gateway event log</h2>
+    <div class="log" data-log>
+      {% for e in st.events %}<div><span class="t">{{ e.ts }}</span> <span class="{{ 'warn' if e.level != 'info' }}">{{ e.msg }}</span></div>
+      {% else %}<div>(no events yet)</div>{% endfor %}
+    </div>
+    <p class="muted">Work (notebooks, files, kernels) lives <strong>on the Colab runtime</strong>, not on
+       this gateway. Gateway redeploys and browser closure leave it untouched. Free-tier runtimes are
+       reclaimed after ~12 hours or idle deletion — checkpoint important results to Drive/GCS.</p>
+    <p class="muted"><a href="/connect">Credential settings</a> · <a href="/health">health</a></p>
+  </div>
+</div>
+
+<script>
+  const st = {{ state_json | safe }};
+  // Light auto-refresh while provisioning/deleting; static otherwise.
+  if (st.status === "PROVISIONING" || st.status === "DELETING") {
+    setTimeout(() => location.reload(), 8000);
+  }
+  if (st.conn && st.token_seconds_left != null) {
+    const el = document.querySelector("[data-expire]");
+    const mins = Math.max(0, Math.round(st.token_seconds_left / 60));
+    if (el) el.insertAdjacentHTML("beforeend", ` <span class="muted">— ~${mins} min left</span>`);
+  }
+</script>
+</body>
+</html>
