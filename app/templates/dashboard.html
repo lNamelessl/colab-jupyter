@@ -117,7 +117,7 @@
 </div>
 
 <script>
-  const st = {{ state_json | safe }};
+  const st = {{ state_json | tojson }};
   // Light auto-refresh while provisioning/deleting; static otherwise.
   if (st.status === "PROVISIONING" || st.status === "DELETING") {
     setTimeout(() => location.reload(), 8000);
