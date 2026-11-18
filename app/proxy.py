@@ -167,35 +167,9 @@ async def proxy_ws(ws: WebSocket, subpath: str) -> None:
         await ws.close(code=1013)
         return
 
-    # Kernels in `starting` state drop sockets at the proxy — wait for idle.
-    m = _KERNEL_CHANNEL_RE.match(subpath)
-    if m:
-        await _wait_kernel_idle(st, m.group(1), timeout_s=60)
-
+    # Accept the browser IMMEDIATELY (headless browsers abort slow handshakes);
+    # the upstream connect + early-frame buffering happens in _pipe.
     await _pipe(ws, st, subpath)
-
-
-async def _wait_kernel_idle(st, kernel_id: str, timeout_s: float) -> None:
-    import httpx as _hx
-
-    deadline = asyncio.get_event_loop().time() + timeout_s
-    state = "unknown"
-    async with _hx.AsyncClient(timeout=UPSTREAM_TIMEOUT) as client:
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                r = await client.get(
-                    f"{st.conn['url']}/api/kernels/{kernel_id}",
-                    headers=_inject({}),
-                )
-                if r.status_code == 404:
-                    return  # kernel does not exist; let the handshake surface it
-                if r.status_code == 200:
-                    state = (r.json() or {}).get("execution_state") or state
-                    if state != "starting":
-                        return
-            except Exception:
-                pass  # transient proxy errors; retry until deadline
-            await asyncio.sleep(2)
 
 
 class _UpstreamBridge:
@@ -296,25 +270,61 @@ def _ws_upstream_url(st, subpath: str, query: str) -> str | None:
     return f"{url}?{urlencode(params)}"
 
 
+class _DeferredSend:
+    """Send sink that buffers browser frames until the upstream bridge is up."""
+
+    def __init__(self) -> None:
+        self.bridge: "_UpstreamBridge | None" = None
+        self.buf: list = []
+
+    def send(self, text: str | None = None, data: bytes | None = None) -> bool:
+        if self.bridge is None:
+            self.buf.append((text, data))
+            return True
+        return self.bridge.send(text=text, data=data)
+
+    def attach(self, bridge) -> None:
+        self.bridge = bridge
+        for text, data in self.buf:
+            if text is not None:
+                bridge.send(text=text)
+            elif data is not None:
+                bridge.send(data=data)
+        self.buf.clear()
+
+
 async def _pipe(ws: WebSocket, st, subpath: str) -> None:
     """Pipe the browser socket to the runtime kernel channel.
+
+    Accepts the browser immediately, then connects the upstream in the
+    background (kernel start can take tens of seconds; slow handshakes abort
+    in headless browsers). Early browser frames are buffered until the bridge
+    is up.
 
     Rotation fallback (empirically validated by the battery): if the upstream
     socket closes while the browser socket is still open, reconnect with the
     freshest token (query params + header re-injected); if the server refuses
     the new handshake on a kernel channel, restart the kernel over REST and
-    try once more; final failure -> close 1012 (JupyterLab auto-reconnects).
+    try once more; final failure -> close 1012 (the notebook UI retries with a
+    fresh session).
     """
     query = urlsplit(str(ws.url)).query or ""
     is_kernel_channel = bool(_KERNEL_CHANNEL_RE.match(subpath))
 
-    bridge = await _connect_bridge(st, subpath, query)
-    if bridge is None:
-        await ws.close(code=1014)
-        return
-
     await ws.accept()
-    to_up = asyncio.create_task(_browser_to_upstream(ws, bridge))
+    deferred = _DeferredSend()
+    to_up = asyncio.create_task(_browser_to_upstream(ws, deferred))
+
+    # ---- initial upstream connect (background, browser already accepted) ----
+    bridge = await _connect_bridge(st, subpath, query, is_kernel_channel)
+    if to_up.done():
+        await _teardown(bridge, to_up, None)
+        return
+    if bridge is None:
+        to_up.cancel()
+        await ws.close(code=1012)
+        return
+    deferred.attach(bridge)
     from_up = asyncio.create_task(_upstream_to_browser(ws, bridge))
 
     done, _pending = await asyncio.wait(
@@ -338,6 +348,7 @@ async def _pipe(ws: WebSocket, st, subpath: str) -> None:
     log.info("Upstream WS closed while browser connected (%s): %s; reconnecting",
              subpath, bridge.close_info)
     bridge.stop()
+    deferred.bridge = None
     bridge = None
     for attempt in range(3):
         try:
@@ -346,29 +357,86 @@ async def _pipe(ws: WebSocket, st, subpath: str) -> None:
                     await st.refresh_now()
                 except Exception:
                     pass  # keep the cached token if GetRuntime hiccups
-            if is_kernel_channel:
-                await _wait_kernel_idle(st, _KERNEL_CHANNEL_RE.match(subpath).group(1), timeout_s=30)
             if attempt == 1 and is_kernel_channel:
                 await _restart_kernel(st, subpath)  # plain reconnect refused -> restart
-            bridge = await _connect_bridge(st, subpath, query)
+            bridge = await _connect_bridge(st, subpath, query, is_kernel_channel, refresh=False)
             if bridge is not None:
                 break
-            log.warning("reconnect attempt %d failed: %s", attempt + 1, "refused")
+            log.warning("reconnect attempt %d failed", attempt + 1)
         except Exception as e:
             log.warning("reconnect attempt %d failed: %s", attempt + 1, e)
         await asyncio.sleep(1)
     if bridge is None:
-        # 1012 = Service Restart: JupyterLab treats it as a lost kernel socket
-        # and auto-reconnects (rebinding to the same kernel over the gateway).
+        # 1012 = Service Restart: the notebook UI treats it as a lost kernel
+        # socket and retries (new session against the same runtime).
         await ws.close(code=1012)
         return
 
+    deferred.attach(bridge)
     from_up = asyncio.create_task(_upstream_to_browser(ws, bridge))
-    to_up = asyncio.create_task(_browser_to_upstream(ws, bridge))
+    to_up = asyncio.create_task(_browser_to_upstream(ws, deferred))
     await asyncio.wait({to_up, from_up}, return_when=asyncio.FIRST_COMPLETED)
     for t in (to_up, from_up):
         t.cancel()
     bridge.stop()
+
+
+async def _teardown(bridge, *tasks) -> None:
+    for t in tasks:
+        if t is not None:
+            t.cancel()
+    if bridge:
+        bridge.stop()
+
+
+async def _connect_bridge(st, subpath: str, query: str, is_kernel_channel: bool = False,
+                          refresh: bool = True) -> "_UpstreamBridge | None":
+    """Connect the upstream bridge. Kernel channels retry while the kernel is
+    `starting` (verified live: sockets to starting kernels DO connect; the
+    earlier wait-for-idle design only added handshake latency)."""
+    headers = {
+        "x-colab-runtime-proxy-token": st.conn["token"],
+        "x-colab-client-agent": "jupyter-gateway-colab",
+    }
+    attempts = 20 if is_kernel_channel else 2  # ~60 s for kernels, 1-shot otherwise
+    refreshed = False
+    for attempt in range(attempts):
+        url = _ws_upstream_url(st, subpath, query)
+        if not url:
+            return None
+        bridge = await _try_bridge(url, headers)
+        if bridge is not None:
+            return bridge
+        if st.status != "ACTIVE" or not st.conn:
+            return None  # runtime reclaimed mid-wait
+        m = _KERNEL_CHANNEL_RE.match(subpath) if is_kernel_channel else None
+        if m and await _kernel_exists(st, m.group(1)) is False:
+            log.info("kernel %s no longer exists; giving up", m.group(1))
+            return None
+        if not refreshed and refresh:
+            try:
+                await st.refresh_now()  # stale endpoint / token rotation
+                headers["x-colab-runtime-proxy-token"] = st.conn["token"]
+                refreshed = True
+            except Exception:
+                pass
+        await asyncio.sleep(3)
+    return None
+
+
+async def _kernel_exists(st, kernel_id: str) -> bool | None:
+    import httpx as _hx
+
+    try:
+        async with _hx.AsyncClient(timeout=UPSTREAM_TIMEOUT) as client:
+            r = await client.get(
+                f"{st.conn['url']}/api/kernels/{kernel_id}", headers=_inject({})
+            )
+            if r.status_code == 404:
+                return False
+            return True
+    except Exception:
+        return None  # unknown; keep trying
 
 
 async def _connect_bridge(st, subpath: str, query: str) -> "_UpstreamBridge | None":
@@ -430,19 +498,19 @@ async def _restart_kernel(st, subpath: str) -> None:
             log.warning("kernel restart fallback failed: %s", e)
 
 
-async def _browser_to_upstream(ws: WebSocket, bridge: "_UpstreamBridge") -> str:
+async def _browser_to_upstream(ws: WebSocket, sink: "_DeferredSend | _UpstreamBridge") -> str:
     while True:
         msg = await ws.receive()
         if msg["type"] == "websocket.disconnect":
             return "browser-gone"
         text = msg.get("text")
         if text is not None:
-            ok = await asyncio.to_thread(bridge.send, text=text)
+            ok = await asyncio.to_thread(sink.send, text=text)
         else:
             data = msg.get("bytes")
             if data is None:
                 continue
-            ok = await asyncio.to_thread(bridge.send, data=data)
+            ok = await asyncio.to_thread(sink.send, data=data)
         if not ok:
             return "send-failed"
 
