@@ -390,6 +390,15 @@ async def admin_create(request: Request):
     if not _session_ok(request):
         return _gate_redirect(request)
     st = get_state()
+    # One concurrent runtime assignment per account (free tier): creating while
+    # a runtime is assigned leaves the new one dangling (GetRuntime never
+    # returns connectionInfo). Reuse the active runtime instead.
+    if st.status == "ACTIVE" and st.conn and st.token_seconds_left() > 0:
+        msg = "Runtime already active — reuse it (delete first to switch specs)."
+        if request.query_params.get("json"):
+            return JSONResponse({"ok": False, "error": msg}, status_code=409)
+        st.event("Create refused: runtime already active", "warn")
+        return RedirectResponse("/admin", status_code=303)
     form = await request.form()
     chosen = str(form.get("spec", ""))
     specs = await _eligible_specs()

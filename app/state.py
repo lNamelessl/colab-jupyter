@@ -153,6 +153,7 @@ class GatewayState:
         async with self._busy:
             self.last_error = None
             prev = self.runtime_name
+            had_conn = self.conn is not None
             self.status = "PROVISIONING"
             self.event(f"Provisioning runtime ({spec.get('accelerator')} {spec.get('shape')})")
             try:
@@ -161,12 +162,14 @@ class GatewayState:
                     on_progress=lambda m: self.event(f"LRO metadata: {m}") if m else None,
                 )
             except colab_mod.ColabApiError as e:
-                self.status = "RECLAIMED" if prev else "NO_RUNTIME"
+                # A failed create does not invalidate the previously adopted
+                # runtime (still assigned server-side) — restore it.
+                self.status = "ACTIVE" if (had_conn and self.conn) else ("RECLAIMED" if prev else "NO_RUNTIME")
                 self.last_error = f"CreateRuntime failed ({e.status}): {e.message}"
                 self.event(self.last_error, "warn")
                 return {"ok": False, "error": self.last_error}
             except Exception as e:
-                self.status = "RECLAIMED" if prev else "NO_RUNTIME"
+                self.status = "ACTIVE" if (had_conn and self.conn) else ("RECLAIMED" if prev else "NO_RUNTIME")
                 self.last_error = f"CreateRuntime failed: {e}"
                 self.event(self.last_error, "warn")
                 return {"ok": False, "error": self.last_error}

@@ -111,6 +111,8 @@ function connectWS() {
   wsReady = { resolved: false, promise: new Promise((res, rej) => { resolve = res; reject = rej }) }
   wsReady.resolve = resolve
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'
+  // session_id in the URL MUST equal the session field in the kernel messages
+  // (the Colab proxy kills mismatched sockets — sibling-verified).
   WS = new WebSocket(`${proto}${location.host}/api/kernels/${KERNEL_ID}/channels?session_id=${JSESSION}`)
   WS.onopen = () => { wsReady.resolved = true; resolve() }
   WS.onmessage = (ev) => {
