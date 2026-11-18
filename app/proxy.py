@@ -79,23 +79,51 @@ async def proxy_rest(request: Request, subpath: str) -> StreamingResponse | JSON
     st.invalidate_if_expired()
     if st.status != "ACTIVE" or not st.conn:
         return _no_runtime_response(st)
-    url = _upstream_url(st, subpath, urlsplit(str(request.url)).query)
 
     headers = _inject(dict(request.headers))
     body = await request.body()
     client: httpx.AsyncClient = request.app.state.http
 
-    req = client.build_request(
-        request.method, url, headers=headers, content=body if body else None
-    )
-    try:
-        resp = await client.send(req, stream=True)
-    except httpx.HTTPError as e:
-        log.warning("upstream error on %s %s: %s", request.method, url, e)
+    resp = await _send_streaming(client, request.method, st, subpath, request, headers, body)
+    if resp is None:
         return JSONResponse(
-            {"error": {"message": f"Upstream Jupyter unreachable: {e}"}},
-            status_code=502,
+            {"error": {"message": "Upstream Jupyter unreachable"}}, status_code=502
         )
+
+    # Stale endpoint detection: the Colab proxy's port mapping rotates when a
+    # runtime is reassigned — the old host answers Go-style "404 page not
+    # found" for every path. Buffer the (small) body, refresh connectionInfo
+    # once and retry; otherwise stream normally.
+    if resp.status_code == 404 and "json" not in (resp.headers.get("content-type") or "").lower():
+        buffered = bytearray()
+        async for chunk in resp.aiter_raw():
+            buffered += chunk
+            if len(buffered) > 65536:
+                break
+        await resp.aclose()
+        if b"404 page not found" in buffered.lower():
+            try:
+                await st.refresh_now()
+            except Exception:
+                return Response(content=bytes(buffered), status_code=404)
+            resp = await _send_streaming(client, request.method, st, subpath, request, headers, body)
+            if resp is None:
+                return JSONResponse(
+                    {"error": {"message": "Upstream Jupyter unreachable after refresh"}},
+                    status_code=502,
+                )
+            if resp.status_code == 404 and "json" not in (resp.headers.get("content-type") or "").lower():
+                stale2 = bytearray()
+                async for chunk in resp.aiter_raw():
+                    stale2 += chunk
+                    if len(stale2) > 65536:
+                        break
+                await resp.aclose()
+                if b"404 page not found" in stale2.lower():
+                    return Response(content=bytes(stale2), status_code=404)
+                return Response(content=bytes(stale2), status_code=resp.status_code)
+        else:
+            return Response(content=bytes(buffered), status_code=resp.status_code)
 
     async def gen():
         try:
@@ -111,6 +139,16 @@ async def proxy_rest(request: Request, subpath: str) -> StreamingResponse | JSON
         and k.lower() not in ("content-encoding", "content-length")
     }
     return StreamingResponse(gen(), status_code=resp.status_code, headers=out_headers)
+
+
+async def _send_streaming(client, method, st, subpath, request, headers, body):
+    url = _upstream_url(st, subpath, urlsplit(str(request.url)).query)
+    req = client.build_request(method, url, headers=headers, content=body if body else None)
+    try:
+        return await client.send(req, stream=True)
+    except httpx.HTTPError as e:
+        log.warning("upstream error on %s %s: %s", method, url, e)
+        return None
 
 
 # ---- WebSocket ------------------------------------------------------------
@@ -336,11 +374,28 @@ async def _connect_bridge(st, subpath: str, query: str) -> "_UpstreamBridge | No
     url = _ws_upstream_url(st, subpath, query)
     if not url:
         return None
-    url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     headers = {
         "x-colab-runtime-proxy-token": st.conn["token"],
         "x-colab-client-agent": "jupyter-gateway-colab",
     }
+    bridge = await _try_bridge(url, headers)
+    if bridge is not None:
+        return bridge
+    # Stale endpoint (port reassignment) or token rotation: one refresh+retry.
+    try:
+        await st.refresh_now()
+    except Exception:
+        return None
+    url = _ws_upstream_url(st, subpath, query)
+    if not url:
+        return None
+    url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+    headers["x-colab-runtime-proxy-token"] = st.conn["token"]
+    return await _try_bridge(url, headers)
+
+
+async def _try_bridge(url: str, headers: dict) -> "_UpstreamBridge | None":
+    url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     bridge = _UpstreamBridge(url, headers)
     bridge.start()
     try:
