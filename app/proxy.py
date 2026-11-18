@@ -439,30 +439,6 @@ async def _kernel_exists(st, kernel_id: str) -> bool | None:
         return None  # unknown; keep trying
 
 
-async def _connect_bridge(st, subpath: str, query: str) -> "_UpstreamBridge | None":
-    url = _ws_upstream_url(st, subpath, query)
-    if not url:
-        return None
-    headers = {
-        "x-colab-runtime-proxy-token": st.conn["token"],
-        "x-colab-client-agent": "jupyter-gateway-colab",
-    }
-    bridge = await _try_bridge(url, headers)
-    if bridge is not None:
-        return bridge
-    # Stale endpoint (port reassignment) or token rotation: one refresh+retry.
-    try:
-        await st.refresh_now()
-    except Exception:
-        return None
-    url = _ws_upstream_url(st, subpath, query)
-    if not url:
-        return None
-    url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-    headers["x-colab-runtime-proxy-token"] = st.conn["token"]
-    return await _try_bridge(url, headers)
-
-
 async def _try_bridge(url: str, headers: dict) -> "_UpstreamBridge | None":
     url = url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     bridge = _UpstreamBridge(url, headers)
