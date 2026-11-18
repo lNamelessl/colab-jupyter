@@ -55,15 +55,22 @@
       <h2>Step 2 — paste the code here</h2>
       <form method="post" action="/connect/code">
         <textarea name="authorization_code" placeholder="4/0A..."></textarea>
+        <label>Quota project ID (required by the Colab API — any Google Cloud project ID
+          of yours; the gateway auto-enables the Colab API on it)</label>
+        <input name="quota_project_id" placeholder="my-project-123"
+               value="{{ quota_default }}" style="width:100%;padding:.5rem;border:1px solid #ccd1d9;border-radius:8px;font-size:.9rem;">
         <button type="submit">Connect with code</button>
       </form>
       <hr>
       <h2>Alternative — paste a full credential JSON</h2>
       <p>If you already hold a refresh-token JSON
-         (<code>{"refresh_token": "...", "client_id": "...", "client_secret": "..."}</code>),
+         (<code>{"refresh_token": "...", "client_id": "...", "client_secret": "...", "quota_project_id": "..."}</code>),
          paste it directly (the <code>GOOGLE_CREDENTIALS_JSON</code> shape):</p>
       <form method="post" action="/connect/json">
-        <textarea name="credential_json" placeholder='{"refresh_token": "...", "client_id": "...", "client_secret": "..."}'></textarea>
+        <textarea name="credential_json" placeholder='{"refresh_token": "...", "client_id": "...", "client_secret": "...", "quota_project_id": "..."}'></textarea>
+        <label>Quota project ID (if not already in the JSON)</label>
+        <input name="quota_project_id" placeholder="my-project-123"
+               value="{{ quota_default }}" style="width:100%;padding:.5rem;border:1px solid #ccd1d9;border-radius:8px;font-size:.9rem;">
         <button type="submit">Connect with JSON</button>
       </form>
       <p class="muted">The refresh token is stored on this gateway's private volume

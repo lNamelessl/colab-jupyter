@@ -32,6 +32,16 @@ SCOPES = [
 # Colab API v1beta
 COLAB_BASE = "https://colaboratory.googleapis.com"
 
+# The Colab API requires a quota project for ADC user credentials: every call
+# must carry x-goog-user-project pointing at a Cloud project where the Colab
+# API is enabled (else PERMISSION_DENIED / SERVICE_DISABLED "requires a quota
+# project"). Resolution order: credential JSON's "quota_project_id" key >
+# this env var > the shared template project below.
+QUOTA_PROJECT_ID = (
+    os.environ.get("QUOTA_PROJECT_ID", "").strip()
+    or "project-05b09e41-482f-4259-8d9"
+)
+
 # Token refresh: GetRuntime when within this window of expireTime, retry 30 s
 # on failure (mirrors colab-vscode ConnectionRefresher).
 REFRESH_BUFFER_S = 5 * 60

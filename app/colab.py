@@ -43,6 +43,22 @@ def _rfc3339(value: str) -> float | None:
         return None
 
 
+def _friendly(detail: str) -> str:
+    """Surface actionable hints for the known Colab API refusal shapes."""
+    low = (detail or "").lower()
+    if "quota project" in low or "service_disabled" in low:
+        return (
+            detail + " — set QUOTA_PROJECT_ID (or credential quota_project_id) "
+            "to a Cloud project with the Colab API enabled"
+        )
+    if "has not been used in project" in low or "it is disabled" in low:
+        return (
+            detail + " — enable propagation can take a minute; retry or run "
+            "gcloud services enable colaboratory.googleapis.com --project <id>"
+        )
+    return detail
+
+
 class ColabClient:
     def __init__(self, credstore) -> None:
         self._creds = credstore
@@ -55,7 +71,19 @@ class ColabClient:
 
     async def _headers(self) -> dict:
         tok = await self._creds.access_token()
-        return {"Authorization": f"Bearer {tok}", "Accept": "application/json"}
+        h = {"Authorization": f"Bearer {tok}", "Accept": "application/json"}
+        # Quirk 57b: the Colab API rejects ADC user credentials without a quota
+        # project — every call carries x-goog-user-project.
+        quota = await self._quota()
+        if quota:
+            h["x-goog-user-project"] = quota
+        return h
+
+    async def _quota(self) -> str:
+        try:
+            return self._creds.quota_project()
+        except Exception:
+            return config.QUOTA_PROJECT_ID
 
     async def _request(self, method: str, path: str, **kw) -> httpx.Response:
         r = await self._client.request(method, path, headers=await self._headers(), **kw)
@@ -66,7 +94,7 @@ class ColabClient:
                 detail = j.get("error", {}).get("message") or str(j)[:300]
             except Exception:
                 detail = r.text[:300]
-            raise ColabApiError(r.status_code, detail)
+            raise ColabApiError(r.status_code, _friendly(detail))
         return r
 
     # ---- resources -----------------------------------------------------
@@ -93,43 +121,60 @@ class ColabClient:
             raise
 
     async def create_runtime(self, spec: dict, on_progress=None) -> dict:
-        """CreateRuntime (LRO). spec = {variant, accelerator, shape} (flat Key).
-        Returns the Runtime resource once the operation completes."""
-        body = {
-            "runtime": {"runtimeSpec": spec},
-            "requestId": str(uuid.uuid4()),
-        }
-        op = (await self._request("POST", "/v1beta/runtimes", json=body)).json()
+        """CreateRuntime (LRO) + poll until live. Returns the Runtime resource.
+
+        Readiness (sibling-verified live 2026-11-18): the LRO metadata carries
+        the runtime name immediately; poll GetRuntime on that id until it
+        returns connectionInfo. The operations.get/:wait endpoints 404 at this
+        host, so GetRuntime polling is the only working readiness signal.
+        Body shape verified live: {"runtimeSpec": {flat Key}} + requestId
+        query param (idempotency).
+        """
+        request_id = str(uuid.uuid4())
+        op = (
+            await self._request(
+                "POST",
+                "/v1beta/runtimes",
+                params={"requestId": request_id},
+                json={"runtimeSpec": spec},
+            )
+        ).json()
         if op.get("done"):
             self._raise_if_op_error(op)
-            runtime = op.get("response") or {}
-            return runtime if runtime.get("name") else {}
+            resp = op.get("response") or {}
+            rt = resp.get("runtime") if "runtime" in resp else resp
+            if rt and rt.get("connectionInfo"):
+                return rt
 
-        op_name = op.get("name")
-        if not op_name:
-            raise ColabApiError(500, "CreateRuntime returned an operation without a name")
-        log.info("LRO started: %s", op_name)
+        runtime_name = (op.get("metadata") or {}).get("runtime") or ""
+        if not runtime_name:
+            raise ColabApiError(500, "CreateRuntime returned no metadata.runtime (cannot poll)")
+        log.info("LRO started for %s; polling GetRuntime until connectionInfo", runtime_name)
+        runtime_id = runtime_name.removeprefix("runtimes/")
         deadline = asyncio.get_event_loop().time() + LRO_TIMEOUT_S
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(3)
-            current = await self._poll_operation(op_name)
-            if current.get("done"):
-                self._raise_if_op_error(current)
-                runtime = current.get("response") or {}
-                if runtime.get("name"):
-                    return runtime
-                # Standard LRO: response is the resource; if absent, GET it.
-                rts = await self.list_runtimes()
-                for r in rts:
-                    if r.get("name", "").endswith(op_name.rsplit("/", 1)[-1]):
-                        return r
-                return {}
+            try:
+                runtime = await self.get_runtime(runtime_id)
+            except RuntimeGoneError:
+                continue  # not visible yet
+            except ColabApiError as e:
+                if e.status == 404:
+                    continue
+                raise
+            if runtime.get("connectionInfo"):
+                if on_progress:
+                    try:
+                        on_progress({"ready": runtime_name})
+                    except Exception:
+                        pass
+                return runtime
             if on_progress:
                 try:
-                    on_progress(current.get("metadata", {}))
+                    on_progress({"runtime": runtime_name})
                 except Exception:
                     pass
-        raise ColabApiError(504, f"LRO {op_name} timed out after {LRO_TIMEOUT_S}s")
+        raise ColabApiError(504, f"CreateRuntime LRO timed out after {LRO_TIMEOUT_S}s")
 
     @staticmethod
     def _raise_if_op_error(op: dict) -> None:
@@ -141,14 +186,6 @@ class ColabClient:
                 if isinstance(d, dict):
                     reason = f" {d.get('reason', '')} {d.get('metadata', '')}".strip()
             raise ColabApiError(400, f"{err.get('message', 'operation failed')} {reason}".strip())
-
-    async def _poll_operation(self, op_name: str) -> dict:
-        try:
-            return (await self._request("GET", f"/v1beta/{op_name}")).json()
-        except ColabApiError as e:
-            if e.status == 404:
-                return (await self._request("GET", f"/v1/{op_name}")).json()
-            raise
 
     async def delete_runtime(self, runtime_name: str) -> None:
         name = runtime_name if "/" in runtime_name else f"runtimes/{runtime_name}"

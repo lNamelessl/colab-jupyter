@@ -42,14 +42,17 @@ gcloud-style **loopback copy-paste** flow — no OAuth client registration of yo
 3. **After approving, the browser lands on a "can't connect" page (localhost refused to
    connect) — that is expected.** Copy the `code=` value from the **address bar**
    (it starts with `4/0A`) and paste it into the gateway's connect page.
-4. The gateway exchanges the code (echoing `redirect_uri=http://localhost:8080` exactly),
+4. Enter a **quota project ID** — any Google Cloud project ID of yours. The Colab API
+   rejects user credentials without a quota project (`x-goog-user-project` header);
+   the gateway auto-enables `colaboratory.googleapis.com` on that project for you.
+5. The gateway exchanges the code (echoing `redirect_uri=http://localhost:8080` exactly),
    validates the credential against the Colab API, and stores the refresh token on its
    private volume (`/data`).
    Alternatively, paste a full credential JSON
-   (`{"refresh_token": "...", "client_id": "...", "client_secret": "..."}`) — the same shape
-   as the `GOOGLE_CREDENTIALS_JSON` variable, which you can also set directly on the service
-   instead of using the connect page.
-5. Click **Provision runtime** (defaults to the eligible free-tier T4), wait 1–3 minutes, then
+   (`{"refresh_token": "...", "client_id": "...", "client_secret": "...", "quota_project_id": "..."}`) —
+   the same shape as the `GOOGLE_CREDENTIALS_JSON` variable, which you can also set directly
+   on the service instead of using the connect page.
+6. Click **Provision runtime** (defaults to the eligible free-tier T4), wait 1–3 minutes, then
    **Open Jupyter**.
 
 > The legacy `sdk.cloud.google.com/applicationdefaultauthcode.html` redirect is dead
@@ -72,6 +75,7 @@ gcloud-style **loopback copy-paste** flow — no OAuth client registration of yo
 |---|---|
 | `GOOGLE_CREDENTIALS_JSON` (optional) | BYO refresh-token JSON; if unset, use the /connect page |
 | `GATEWAY_PASSWORD` | gateway login password (auto-generated per deploy by the template) |
+| `QUOTA_PROJECT_ID` (optional) | Google Cloud project ID used as the Colab API quota project (`x-goog-user-project`); the credential's own `quota_project_id` key wins when present |
 | `TZ` | optional timezone |
 
 Volume `/data` stores the Google credential JSON and the session signing key, so logins and

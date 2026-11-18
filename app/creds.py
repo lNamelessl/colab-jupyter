@@ -44,12 +44,27 @@ class CredStore:
     @staticmethod
     def _valid(data: dict | None) -> dict | None:
         if isinstance(data, dict) and all(k in data and data[k] for k in REQUIRED_KEYS):
-            return {
+            out = {
                 "refresh_token": data["refresh_token"],
                 "client_id": data["client_id"],
                 "client_secret": data["client_secret"],
             }
+            if data.get("quota_project_id"):
+                out["quota_project_id"] = data["quota_project_id"]
+            if data.get("token_uri"):
+                out["token_uri"] = data["token_uri"]
+            return out
         return None
+
+    def quota_project(self) -> str:
+        """Quota project for x-goog-user-project: credential key > env > default."""
+        with self._lock:
+            if self._creds is not None and getattr(self._creds, "quota_project_id", None):
+                return self._creds.quota_project_id
+        data = self._load_file()
+        if data and data.get("quota_project_id"):
+            return data["quota_project_id"]
+        return config.QUOTA_PROJECT_ID
 
     def load_env(self) -> bool:
         """Adopt the GOOGLE_CREDENTIALS_JSON variable if present and valid."""
@@ -105,10 +120,11 @@ class CredStore:
             self._creds = Credentials(
                 token=None,
                 refresh_token=data["refresh_token"],
-                token_uri=config.TOKEN_URI,
+                token_uri=data.get("token_uri") or config.TOKEN_URI,
                 client_id=data["client_id"],
                 client_secret=data["client_secret"],
                 scopes=config.SCOPES,
+                quota_project_id=data.get("quota_project_id") or None,
             )
             self._email = None
 
@@ -179,7 +195,7 @@ def consent_url() -> str:
     return f"{config.OAUTH_AUTH_URI}?{params}"
 
 
-async def exchange_code(code: str, httpx_client) -> dict:
+async def exchange_code(code: str, httpx_client, quota_project_id: str = "") -> dict:
     """Exchange the address-bar authorization code for a refresh token.
     The redirect_uri MUST be echoed exactly as http://localhost:8080."""
     r = await httpx_client.post(
@@ -203,8 +219,13 @@ async def exchange_code(code: str, httpx_client) -> dict:
             f"Token exchange failed ({r.status_code}): "
             f"{body.get('error_description') or body.get('error') or body.get('raw', '')}"
         )
-    return {
+    out = {
         "refresh_token": body["refresh_token"],
         "client_id": config.OAUTH_CLIENT_ID,
         "client_secret": config.OAUTH_CLIENT_SECRET,
     }
+    if quota_project_id.strip():
+        out["quota_project_id"] = quota_project_id.strip()
+    elif config.QUOTA_PROJECT_ID:
+        out["quota_project_id"] = config.QUOTA_PROJECT_ID
+    return out

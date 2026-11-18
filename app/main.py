@@ -164,6 +164,7 @@ async def connect_page(request: Request):
             "consent_url": creds_mod.consent_url(),
             "connected": st.creds.has(),
             "email": await st.creds.user_email() if st.creds.has() else None,
+            "quota_default": config.QUOTA_PROJECT_ID,
             "error": None,
         },
     )
@@ -176,12 +177,18 @@ async def connect_json(request: Request):
     st = get_state()
     form = await request.form()
     raw = str(form.get("credential_json", "")).strip()
+    quota = str(form.get("quota_project_id", "")).strip()
     try:
         import json as _json
 
         data = _json.loads(raw)
+        if quota and not data.get("quota_project_id"):
+            data["quota_project_id"] = quota
+        elif not data.get("quota_project_id") and config.QUOTA_PROJECT_ID:
+            data["quota_project_id"] = config.QUOTA_PROJECT_ID
         st.creds.save(data)
         get_state().event("Google credential saved from pasted JSON")
+        await _enable_colab_api(data.get("quota_project_id", ""))
         await _validate_credential()
     except creds_mod.CredentialError as e:
         return templates.TemplateResponse(
@@ -206,6 +213,7 @@ async def connect_code(request: Request):
         return _gate_redirect(request)
     form = await request.form()
     code = str(form.get("authorization_code", "")).strip()
+    quota = str(form.get("quota_project_id", "")).strip()
     if not code:
         return templates.TemplateResponse(
             request, "connect.html",
@@ -216,9 +224,10 @@ async def connect_code(request: Request):
     st = get_state()
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            data = await creds_mod.exchange_code(code, client)
+            data = await creds_mod.exchange_code(code, client, quota_project_id=quota)
         st.creds.save(data)
         st.event("Google credential saved from loopback authorization code")
+        await _enable_colab_api(data.get("quota_project_id", ""))
         await _validate_credential()
     except creds_mod.CredentialError as e:
         return templates.TemplateResponse(
@@ -235,6 +244,25 @@ async def connect_code(request: Request):
             status_code=400,
         )
     return RedirectResponse("/admin", status_code=303)
+
+
+async def _enable_colab_api(quota_project: str) -> None:
+    """Best-effort: enable colaboratory.googleapis.com on the quota project
+    (the Colab API rejects ADC user creds without an enabled quota project)."""
+    if not quota_project:
+        return
+    st = get_state()
+    try:
+        tok = st.creds.access_token()
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"https://serviceusage.googleapis.com/v1/projects/{quota_project}"
+                "/services/colaboratory.googleapis.com:enable",
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+        st.event(f"Colab API enable on {quota_project}: HTTP {r.status_code}")
+    except Exception as e:
+        st.event(f"Colab API enable attempt failed: {e}", "warn")
 
 
 @app.post("/connect/disconnect")

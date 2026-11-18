@@ -33,14 +33,16 @@ What the template gives you:
 One Railway service (Python 3.12 + FastAPI + httpx + websockets + google-auth, built from the
 repo Dockerfile, runs non-root) plus one private volume at `/data` that holds your Google
 credential JSON and the gateway session key. After deploy, the template asks for exactly one
-variable: `GOOGLE_CREDENTIALS_JSON` — your Google refresh-token JSON. If you skip it, the
-gateway serves a built-in connect page where you can complete the same OAuth loopback
-copy-paste flow interactively (open the consent page, approve the `colaboratory` scope, copy
-the `code=4/0A...` value from the localhost address bar, paste it back). `GATEWAY_PASSWORD`
-is pre-wired to a per-deploy generated secret — find it on the service's Variables tab, sign
-in, click **Provision runtime** (defaults to the free-tier T4 when eligible), wait 1–3
-minutes for Google to assign the runtime, then click **Open Jupyter**. Everything you do
-afterwards — notebooks, files, kernels, sessions — lives on the Colab runtime server-side.
+variable: `GOOGLE_CREDENTIALS_JSON` — your Google refresh-token JSON (plus an optional
+`QUOTA_PROJECT_ID`, the Google Cloud project ID the Colab API requires as quota project).
+If you skip the variable, the gateway serves a built-in connect page where you can complete
+the same OAuth loopback copy-paste flow interactively (open the consent page, approve the
+`colaboratory` scope, copy the `code=4/0A...` value from the localhost address bar, paste it
+back together with a quota project ID). `GATEWAY_PASSWORD` is pre-wired to a per-deploy
+generated secret — find it on the service's Variables tab, sign in, click **Provision
+runtime** (defaults to the free-tier T4 when eligible), wait 1–3 minutes for Google to
+assign the runtime, then click **Open Jupyter**. Everything you do afterwards — notebooks,
+files, kernels, sessions — lives on the Colab runtime server-side.
 
 ## Why Deploy
 
@@ -74,11 +76,16 @@ templates cannot offer at any price.
   gateway orchestrates runtimes on your own account via the official Colab API
   (`colaboratory.googleapis.com`, scope `colaboratory`) — sanctioned orchestration, no quota
   reselling, no synthetic keep-alive; consumer Colab ToS and compute-unit limits apply.
+- **A Google Cloud project used as the Colab API quota project** (any active project of
+  yours; the gateway auto-enables `colaboratory.googleapis.com` on it at connect time).
+  Without one the Colab API returns 403 SERVICE_DISABLED for user credentials —
+  enter its ID at `/connect` or set the `QUOTA_PROJECT_ID` variable.
 - **A Google OAuth refresh token** with the `colaboratory` scope: provide it as the
-  `GOOGLE_CREDENTIALS_JSON` deploy variable (shape: refresh_token, client_id, client_secret)
-  or complete the built-in /connect loopback copy-paste flow after deploy — no custom OAuth
-  client registration required (the gateway uses the gcloud-style installed-app client with
-  the localhost loopback redirect; the old sdk.cloud.google.com redirect is dead).
+  `GOOGLE_CREDENTIALS_JSON` deploy variable (shape: refresh_token, client_id,
+  client_secret, quota_project_id) or complete the built-in /connect loopback copy-paste
+  flow after deploy — no custom OAuth client registration required (the gateway uses the
+  gcloud-style installed-app client with the localhost loopback redirect; the old
+  sdk.cloud.google.com redirect is dead).
 - **Railway-provisioned pieces** (automatic): one service from the repo Dockerfile, one
   volume mounted at `/data` (credential + session key persistence), one domain with the
   `/health` healthcheck wired (`GATEWAY_PASSWORD` pre-wired to a per-deploy generated
