@@ -1,0 +1,10 @@
+{
+  "input": {
+    "projectId": "058dcce4-eacf-466f-a291-03a11ed51ac4",
+    "environmentId": "41fb16d2-1ef3-4078-8ebe-b08201668926",
+    "serviceId": "d3c0f9de-6990-41ae-a23f-624379e8d1a6",
+    "name": "GATEWAY_PASSWORD",
+    "value": "${{secret(24)}}",
+    "skipDeploys": true
+  }
+}
